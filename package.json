@@ -1,0 +1,8 @@
+{
+  "scripts": {
+    "now-build": "rm -rf ./public && hugo"
+  },
+  "dependencies": {
+    "hugo-cli": "^0.9.0"
+  }
+}

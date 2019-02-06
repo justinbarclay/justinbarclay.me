@@ -1,4 +1,7 @@
 {
   "version": 2,
-  "builds": [{ "src": "public/*/**", "use": "@now/static", "entrypoint": "public/index.html"}]
+  "name": "justinbarclay",
+  "builds":[
+    { "src": "package.json", "use": "@now/static-build", "config": { "distDir": "public" }}
+  ]
 }
