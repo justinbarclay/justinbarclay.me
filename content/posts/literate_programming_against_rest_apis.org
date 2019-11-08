@@ -31,7 +31,7 @@ Let's take a look at an example of what restclient looks like when authenticatin
 #+END_SRC
 
 Then, once you've POSTed the request a new buffer opens up with the response.
-#+NAME restclient response
+#+NAME: restclient response
 #+begin_example
 {
   "token_type": "bearer",
