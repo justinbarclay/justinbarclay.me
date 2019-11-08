@@ -2,7 +2,7 @@
 title = "Literate Programming against REST APIs"
 author = ["Justin Barclay"]
 date = 2019-02-02T00:00:00-07:00
-lastmod = 2019-02-02T18:56:34-07:00
+lastmod = 2019-11-08T12:36:03-07:00
 tags = ["emacs", "node", "ruby", "restclient", "twitter", "google"]
 categories = ["emacs"]
 draft = false
@@ -26,7 +26,6 @@ grant_type=client_credentials
 ```
 
 Then, once you've POSTed the request a new buffer opens up with the response.
-\#+NAME restclient response
 
 ```text
 {
@@ -83,7 +82,7 @@ If you've never heard of org-mode, here's three key things to know before going 
 
 If you're curious what this post looks like in org-mode you can find a copy [here](https://raw.githubusercontent.com/justinbarclay/justinbarclay.me/master/content/posts/literate%5Fprogramming%5Fagainst%5Frest%5Fapis.org).
 
-Or, if you would like run arbitrary elisp at home, you can download the following file in Emacs or your favourite [flavours](http://spacemacs.org/) of [Vim](https://github.com/hlissner/doom-emacs).
+Or, if you would like to run arbitrary elisp at home, you can download the following file in Emacs or your favourite [flavours](http://spacemacs.org/) of [Vim](https://github.com/hlissner/doom-emacs).
 
 ```elisp
 (browse-url-emacs "https://raw.githubusercontent.com/justinbarclay/justinbarclay.me/master/content/posts/literate_programming_against_rest_apis.org")

@@ -11,7 +11,6 @@
 
 #+hugo_tags: emacs node ruby restclient twitter google
 #+hugo_categories: emacs
-
 #+hugo_draft: false
 * Rest Call Me Maybe
 
@@ -82,9 +81,11 @@ If you've never heard of org-mode, here's three key things to know before going 
 [[./images/org-mode-low-quality.gif]]
 
 ** Follow along at home!
-If you would like run arbitrary elisp at home, you can download the following file in Emacs or your favourite [[http://spacemacs.org/][flavours]] of [[https://github.com/hlissner/doom-emacs][Vim]].
+If you're curious what this post looks like in org-mode you can find a copy [[https://raw.githubusercontent.com/justinbarclay/justinbarclay.me/master/content/posts/literate%5Fprogramming%5Fagainst%5Frest%5Fapis.org][here]].
+
+Or, if you would like to run arbitrary elisp at home, you can download the following file in Emacs or your favourite [[http://spacemacs.org/][flavours]] of [[https://github.com/hlissner/doom-emacs][Vim]].
 #+BEGIN_SRC elisp
-  (browse-url-emacs "https://raw.githubusercontent.com/justinbarclay/-_-/master/twitter_has_put_me_in_a_vegetative_state.org")
+(browse-url-emacs "https://raw.githubusercontent.com/justinbarclay/justinbarclay.me/master/content/posts/literate_programming_against_rest_apis.org")
 #+END_SRC
 
 Of course, you need to go out and download restclient and ob-restclient and thats it, thats all the Emacs packages you need. Oh... also NodeJS and Ruby, don't @ me. Ok @ me, I'm lonely.
