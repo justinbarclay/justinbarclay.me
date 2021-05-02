@@ -1,0 +1,658 @@
+#+PROPERTY: header-args:sql :engine "postgresql" :dbuser postgres :dbpassword "password" :database database :dbhost 127.0.0.1
+
+#+BEGIN_QUOTE
+This document is meant to be run interactively. If you'd like to follow along, open up your version Emacs, move your cursor to a code block then press ~C-c C-c~ to run it.
+#+END_QUOTE
+
+* Demo Setup
+Evaluate this code to have psql error logs displayed within Emacs
+#+begin_src elisp
+(defvar org-babel-eval-verbose t
+  "A non-nil value makes `org-babel-eval' display")
+
+(defun org-babel-eval (cmd body)
+  "Run CMD on BODY.
+If CMD succeeds then return its results, otherwise display
+STDERR with `org-babel-eval-error-notify'."
+  (let ((err-buff (get-buffer-create " *Org-Babel Error*")) exit-code)
+    (with-current-buffer err-buff (erase-buffer))
+    (with-temp-buffer
+      (insert body)
+      (setq exit-code
+            (org-babel--shell-command-on-region
+             (point-min) (point-max) cmd err-buff))
+      (if (or (not (numberp exit-code)) (> exit-code 0)
+              (and org-babel-eval-verbose (> (buffer-size err-buff) 0))) ; new condition
+          (progn
+            (with-current-buffer err-buff
+              (org-babel-eval-error-notify exit-code (buffer-string)))
+            nil)
+        (buffer-string)))))
+#+end_src
+
+* How I sped up demo data generation by 97%
+** ...or how I chose to copy data instead of generate it
+* Why work on this?
+On my work machine it takes roughly 12 minutes to generate all the primary records, their measurements, and to crawl our urls and analyze their technologies. However, if we change our approach to caching this work and copying into our accounts, using pure SQL, we can drop this time down to 20 seconds.
+
+Aside from pure efficiency why should we invest in this? It's all about the users.
+It leads to:
+  1. A better onboarding experience by allowing accounts to come preloaded with demo-data
+  2. Allow users to be able experiment with our platform while giving a quick "undo" button
+* Using Pure SQL to Copy
+When I started this adventure I knew very little about SQL and less so the variant we use, PSQL. I knew enough to write some select statements and maybe do a join. Did you know you could write full on programs in it? It's even Turing complete! 🤯 It's not pretty but it works.
+
+I had a pretty good idea of what I wanted to do from a high level. We want to use a schema, called ~secondary~, to cache any demo data generation we do. Then, when we want to populate an account, schema, with demo data we copy data from the ~secondary~ schema into the client schema.
+
+Simple, but I had no clue how to do this. I had no clue about the meta programming possible in PSQL. So, I did what every good developer does. Go to StackOverflow.
+
+That led me on a short journey onto the [[https://wiki.postgresql.org/wiki/Clone_schema][PostgreSQL wiki]] on how to clone tables from one schema onto another schema. Close but it has nothing about cloning the data or meta data about those tables.
+
+This wiki links to a more complete [[https://www.postgresql.org/message-id/CANu8FiyJtt-0q%3DbkUxyra66tHi6FFzgU8TqVR2aahseCBDDntA%40mail.gmail.com ][mailing list post]] that goes over how to copy all the data from a source schema into a brand new schema.
+
+#+begin_src sql
+  -- Function: clone_schema(text, text)
+
+  -- DROP FUNCTION clone_schema(text, text);
+
+  CREATE OR REPLACE FUNCTION clone_schema(
+      source_schema text,
+      dest_schema text,
+      include_recs boolean)
+    RETURNS void AS
+  $BODY$
+
+  --  This function will clone all sequences, tables, data, views & functions from any existing schema to a new one
+  -- SAMPLE CALL:
+  -- SELECT clone_schema('public', 'new_schema', TRUE);
+
+  DECLARE
+    src_oid          oid;
+    tbl_oid          oid;
+    func_oid         oid;
+    object           text;
+    buffer           text;
+    srctbl           text;
+    default_         text;
+    column_          text;
+    qry              text;
+    dest_qry         text;
+    v_def            text;
+    seqval           bigint;
+    sq_last_value    bigint;
+    sq_max_value     bigint;
+    sq_start_value   bigint;
+    sq_increment_by  bigint;
+    sq_min_value     bigint;
+    sq_cache_value   bigint;
+    sq_log_cnt       bigint;
+    sq_is_called     boolean;
+    sq_is_cycled     boolean;
+    sq_cycled        char(10);
+  BEGIN
+
+  -- Check that source_schema exists
+    SELECT oid INTO src_oid
+      FROM pg_namespace
+     WHERE nspname = quote_ident(source_schema);
+    IF NOT FOUND
+      THEN 
+      RAISE NOTICE 'source schema % does not exist!', source_schema;
+      RETURN ;
+        END IF;
+
+    -- Check that dest_schema does not yet exist
+    PERFORM nspname 
+      FROM pg_namespace
+     WHERE nspname = quote_ident(dest_schema);
+    IF FOUND
+      THEN 
+      RAISE NOTICE 'dest schema % already exists!', dest_schema;
+      RETURN ;
+    END IF;
+
+    EXECUTE 'CREATE SCHEMA ' || quote_ident(dest_schema) ;
+
+    -- Create sequences
+    -- TODO: Find a way to make this sequence's owner is the correct table.
+    FOR object IN
+      SELECT sequence_name::text 
+        FROM information_schema.sequences
+        WHERE sequence_schema = quote_ident(source_schema)
+    LOOP
+      EXECUTE 'CREATE SEQUENCE ' || quote_ident(dest_schema) || '.' || quote_ident(object);
+      srctbl := quote_ident(source_schema) || '.' || quote_ident(object);
+
+      EXECUTE 'SELECT last_value, max_value, start_value, increment_by, min_value, cache_value, log_cnt, is_cycled, is_called 
+                FROM ' || quote_ident(source_schema) || '.' || quote_ident(object) || ';' 
+                INTO sq_last_value, sq_max_value, sq_start_value, sq_increment_by, sq_min_value, sq_cache_value, sq_log_cnt, sq_is_cycled, sq_is_called ; 
+
+      IF sq_is_cycled 
+        THEN 
+          sq_cycled := 'CYCLE';
+      ELSE
+          sq_cycled := 'NO CYCLE';
+      END IF;
+
+      EXECUTE 'ALTER SEQUENCE '   || quote_ident(dest_schema) || '.' || quote_ident(object) 
+              || ' INCREMENT BY ' || sq_increment_by
+              || ' MINVALUE '     || sq_min_value 
+              || ' MAXVALUE '     || sq_max_value
+              || ' START WITH '   || sq_start_value
+              || ' RESTART '      || sq_min_value 
+              || ' CACHE '        || sq_cache_value 
+              || sq_cycled || ' ;' ;
+
+      buffer := quote_ident(dest_schema) || '.' || quote_ident(object);
+      IF include_recs 
+          THEN
+              EXECUTE 'SELECT setval( ''' || buffer || ''', ' || sq_last_value || ', ' || sq_is_called || ');' ; 
+      ELSE
+              EXECUTE 'SELECT setval( ''' || buffer || ''', ' || sq_start_value || ', ' || sq_is_called || ');' ;
+      END IF;
+
+    END LOOP;
+
+  -- Create tables 
+    FOR object IN
+      SELECT TABLE_NAME::text 
+        FROM information_schema.tables 
+       WHERE table_schema = quote_ident(source_schema)
+         AND table_type = 'BASE TABLE'
+
+    LOOP
+      buffer := dest_schema || '.' || quote_ident(object);
+      EXECUTE 'CREATE TABLE ' || buffer || ' (LIKE ' || quote_ident(source_schema) || '.' || quote_ident(object) 
+          || ' INCLUDING ALL)';
+
+      IF include_recs 
+        THEN 
+        -- Insert records from source table
+        EXECUTE 'INSERT INTO ' || buffer || ' SELECT * FROM ' || quote_ident(source_schema) || '.' || quote_ident(object) || ';';
+      END IF;
+
+      FOR column_, default_ IN
+        SELECT column_name::text, 
+               REPLACE(column_default::text, source_schema, dest_schema) 
+          FROM information_schema.COLUMNS 
+         WHERE table_schema = dest_schema 
+           AND TABLE_NAME = object 
+           AND column_default LIKE 'nextval(%' || quote_ident(source_schema) || '%::regclass)'
+      LOOP
+        EXECUTE 'ALTER TABLE ' || buffer || ' ALTER COLUMN ' || column_ || ' SET DEFAULT ' || default_;
+      END LOOP;
+
+    END LOOP;
+
+  --  add FK constraint
+    FOR qry IN
+      SELECT 'ALTER TABLE ' || quote_ident(dest_schema) || '.' || quote_ident(rn.relname) 
+                            || ' ADD CONSTRAINT ' || quote_ident(ct.conname) || ' ' || pg_get_constraintdef(ct.oid) || ';'
+        FROM pg_constraint ct
+        JOIN pg_class rn ON rn.oid = ct.conrelid
+       WHERE connamespace = src_oid
+         AND rn.relkind = 'r'
+         AND ct.contype = 'f'
+
+      LOOP
+        EXECUTE qry;
+
+      END LOOP;
+
+
+  -- Create views 
+    FOR object IN
+      SELECT table_name::text,
+             view_definition 
+        FROM information_schema.views
+       WHERE table_schema = quote_ident(source_schema)
+
+    LOOP
+      buffer := dest_schema || '.' || quote_ident(object);
+      SELECT view_definition INTO v_def
+        FROM information_schema.views
+       WHERE table_schema = quote_ident(source_schema)
+         AND table_name = quote_ident(object);
+
+      EXECUTE 'CREATE OR REPLACE VIEW ' || buffer || ' AS ' || v_def || ';' ;
+
+    END LOOP;
+
+  -- Create functions 
+    FOR func_oid IN
+      SELECT oid
+        FROM pg_proc 
+       WHERE pronamespace = src_oid
+
+    LOOP      
+      SELECT pg_get_functiondef(func_oid) INTO qry;
+      SELECT replace(qry, source_schema, dest_schema) INTO dest_qry;
+      EXECUTE dest_qry;
+
+    END LOOP;
+
+    RETURN; 
+
+  END;
+
+  $BODY$
+    LANGUAGE plpgsql VOLATILE
+    COST 100;
+  ALTER FUNCTION clone_schema(text, text, boolean)
+    OWNER TO postgres;
+#+end_src
+
+Woh. That's a lot of sql and there are words like CREATE, and OR, and LOOP in there. Let's step back a bit and go section by section.
+** Syntax Preamble
+A quick detour around some syntax your might not be familiar with. 
+*** Functions
+This is the standard function syntax, some items are optional. Like, you don't need to have an or option, you don't need to have any arguments, and you don't have to declare any variables.
+#+begin_src sql
+  CREATE OR REPLACE FUNCTION demo_func(
+
+      source_schema text
+  )
+    RETURNS void AS
+  $BODY$
+
+  DECLARE
+    src_oid          oid;
+
+  BEGIN
+  --  ...
+  END;
+  $BODY$
+#+end_src
+
+You can also have anonymous, where they operate just like normal function but lack a name, arguments or the ability to return anything. Anonymous functions are good for when you just need to do some work and you need the full power of the PL/pgSQL language (loops, conditionals, logs/errors), but don't need to name it or return anything.
+
+#+begin_src sql
+  do $$
+  DECLARE
+    src_oid oid;
+  BEGIN
+  -- ...
+  END
+  $$;
+#+end_src
+
+*** For loops!
+Like most modern languages PL/pgSQL has for loops. However, for loops can only run within function calls.
+
+So to write a for loop in an anonymous function it would look something like this:
+#+NAME: For loop example
+#+begin_src sql
+  do $$
+  BEGIN
+   FOR counter IN 1..5 LOOP
+     RAISE NOTICE 'Counter: %', counter;
+     END LOOP;
+   END
+  $$;
+#+end_src
+
+If you copy and paste this into a psql repl you would get output like below:
+#+NAME: Example output
+#+begin_src sql
+NOTICE:  Counter: 1
+NOTICE:  Counter: 2
+NOTICE:  Counter: 3
+NOTICE:  Counter: 4
+NOTICE:  Counter: 5
+#+end_src
+
+For loops in general can work across an iterable item, be it a range, an array, or the results of a query.
+
+That's all there is for unique or semi non obvious syntax. Hopefully the rest makes sense
+
+* Let's break it down
+#+BEGIN_COMMENT
+Some of my examples are going to include chunks of code wrapped in a function definition. This is so that we can easily mimic the calling environment, or call special syntax, or get some nice print out here in org mode. That means, for the most part, things being functions are an implementation detail and can be safely ignored.
+#+END_COMMENT
+** Meta programming in Postgres
+Postgres keeps a tables of information about itself and it's state, they call the collection of meta data [[https://www.postgresql.org/docs/13/catalogs.html][systems catalog]]. Generally, these tables are prefixed with ~pg~. For example ~pg_namespace~ is a table that contains information about all the schema's stored in the database
+#+begin_src sql
+SELECT * FROM pg_namespace;
+#+end_src
+
+** Operating on Schemas
+*** Check for schema existence
+Knowing about the existence of ~pg_namespace~ gives us the ability to understand the first section of code
+#+begin_src sql
+-- Check that source_schema exists
+    SELECT oid INTO src_oid
+      FROM pg_namespace
+     WHERE nspname = quote_ident(source_schema);
+    IF NOT FOUND
+      THEN 
+      RAISE NOTICE 'source schema % does not exist!', source_schema;
+      RETURN ;
+        END IF;
+
+    -- Check that dest_schema does not yet exist
+    PERFORM nspname 
+      FROM pg_namespace
+     WHERE nspname = quote_ident(dest_schema);
+    IF FOUND
+      THEN 
+      RAISE NOTICE 'dest schema % already exists!', dest_schema;
+      RETURN ;
+    END IF;
+
+    EXECUTE 'CREATE SCHEMA ' || quote_ident(dest_schema) ;
+#+end_src
+
+Unfortunately, in it's current form, we can't really run that SQL. Let's make it a function so we can normalize the results:
+#+NAME: Check that source_schema exists
+#+begin_src sql
+  CREATE OR REPLACE FUNCTION check_existence(
+    source_schema text)
+    RETURNS bool AS $BODY$
+  BEGIN
+  
+   PERFORM oid
+      FROM pg_namespace
+     WHERE nspname = quote_ident(source_schema);
+    IF NOT FOUND
+    THEN
+      RAISE NOTICE 'source schema % does not exist!', source_schema;
+      RETURN false;
+    ELSE
+      RETURN true;
+    END IF;
+  END;
+  $BODY$
+
+  LANGUAGE plpgsql VOLATILE
+  COST 100;
+
+  SELECT check_existence('primary');
+#+end_src
+
+#+RESULTS: Check that source_schema exists
+| CREATE FUNCTION |
+|-----------------|
+| check_existence |
+| t               |
+
+We can also check for non existence of a schema
+#+NAME: Check that the dest schema doesn't exist
+#+begin_src sql
+  SELECT check_existence('secondary');
+#+end_src
+*** Creating a schema
+Great now we know that the ~secondary~ schema doesn't exist, let's make one. Luckily creating a schema is pretty easy.
+#+begin_src sql
+ CREATE SCHEMA secondary;
+#+end_src
+
+And we can use our function to verify.
+#+begin_src sql
+  SELECT check_existence('secondary');
+#+end_src
+
+** Sequences
+The next step in copying one schema to another is to copy the Sequences
+#+begin_src sql
+    FOR object IN
+      SELECT sequence_name::text 
+        FROM information_schema.sequences
+        WHERE sequence_schema = quote_ident(source_schema)
+    LOOP
+      EXECUTE 'CREATE SEQUENCE ' || quote_ident(dest_schema) || '.' || quote_ident(object);
+      srctbl := quote_ident(source_schema) || '.' || quote_ident(object);
+
+      EXECUTE 'SELECT last_value, max_value, start_value, increment_by, min_value, cache_value, log_cnt, is_cycled, is_called 
+                FROM ' || quote_ident(source_schema) || '.' || quote_ident(object) || ';' 
+                INTO sq_last_value, sq_max_value, sq_start_value, sq_increment_by, sq_min_value, sq_cache_value, sq_log_cnt, sq_is_cycled, sq_is_called ; 
+
+      IF sq_is_cycled 
+        THEN 
+          sq_cycled := 'CYCLE';
+      ELSE
+          sq_cycled := 'NO CYCLE';
+      END IF;
+
+      EXECUTE 'ALTER SEQUENCE '   || quote_ident(dest_schema) || '.' || quote_ident(object) 
+              || ' INCREMENT BY ' || sq_increment_by
+              || ' MINVALUE '     || sq_min_value 
+              || ' MAXVALUE '     || sq_max_value
+              || ' START WITH '   || sq_start_value
+              || ' RESTART '      || sq_min_value 
+              || ' CACHE '        || sq_cache_value 
+              || sq_cycled || ' ;' ;
+
+      buffer := quote_ident(dest_schema) || '.' || quote_ident(object);
+      IF include_recs 
+          THEN
+              EXECUTE 'SELECT setval( ''' || buffer || ''', ' || sq_last_value || ', ' || sq_is_called || ');' ; 
+      ELSE
+              EXECUTE 'SELECT setval( ''' || buffer || ''', ' || sq_start_value || ', ' || sq_is_called || ');' ;
+      END IF;
+
+    END LOOP;
+#+end_src
+*** What is a Sequence
+A Sequence is a special table that generates a sequence of numbers. You'll often see a sequence being used for generating IDs for tables.
+**** Copying Sequence and Values
+When copying sequences we're looking to: 
+1. Get all sequence names from source schema
+2. Copy selected sequence names into dest schema
+3. Populate them with meta data from source sequences
+4. Update destination schema number to match source schema numbers
+**** 1. Get All Sequence Names
+#+begin_src sql
+  SELECT sequence_name::text 
+   FROM information_schema.sequences
+   WHERE sequence_schema = quote_ident('primary')
+#+end_src
+
+Before we move on let's make sure our new schema doesn't have any sequences
+
+#+begin_src sql
+  SELECT sequence_name::text 
+   FROM information_schema.sequences
+   WHERE sequence_schema = quote_ident('secondary')
+#+end_src
+
+**** 2. Create Sequence
+Typically this would look something like
+#+begin_src sql
+  FOR object IN
+    SELECT sequence_name::text 
+           FROM information_schema.sequences
+           WHERE sequence_schema = quote_ident(source_schema)
+  LOOP
+    EXECUTE 'CREATE SEQUENCE ' || quote_ident(dest_schema) || '.' || quote_ident(object);
+    srctbl := quote_ident(source_schema) || '.' || quote_ident(object);
+  END LOOP;
+#+end_src
+
+There can be a lot of sequences in a schema, so let's zoom in on one sequence and follow it through the process.
+From the code above, where you see ~object~ we're going to replace it with ~'records_id_seq'~, one of the values from the above select statement.
+#+begin_src sql
+  CREATE SEQUENCE secondary.records_id_seq;
+#+end_src
+
+And let's look at what we made
+#+begin_src sql
+  SELECT * FROM secondary.records_id_seq;
+#+end_src
+
+Now we're going to fake it a little bit so we can more easily see what the next statement is doing.
+
+**** Copy Sequence Values
+We can translate:
+#+begin_src sql
+    EXECUTE 'SELECT last_value, max_value, start_value, increment_by, min_value, cache_value, log_cnt, is_cycled, is_called 
+    FROM ' || quote_ident('primary') || '.' || quote_ident(object) || ';' 
+    INTO sq_last_value, sq_max_value, sq_start_value, sq_increment_by, sq_min_value, sq_cache_value, sq_log_cnt, sq_is_cycled, sq_is_called ; 
+#+end_src
+
+To:
+#+begin_src sql
+  SELECT last_value AS sq_last_value, max_value AS sq_max_value, start_value AS sq_start_value, increment_by AS sq_increment_by,
+         min_value AS sq_min_value, cache_value AS sq_cache_value, log_cnt AS sq_log_cnt, is_cycled AS sq_is_cycled,
+         is_called AS sq_is_called
+  FROM primary.records_id_seq;
+#+end_src
+
+#+RESULTS:
+| sq_last_value |        sq_max_value | sq_start_value | sq_increment_by | sq_min_value | sq_cache_value | sq_log_cnt | sq_is_cycled | sq_is_called |
+|---------------+---------------------+----------------+-----------------+--------------+----------------+------------+--------------+--------------|
+|            57 | 9223372036854775807 |              1 |               1 |            1 |              1 |          9 | f            | t            |
+
+Now because of how sql works we have to convert data from a boolean to a string. So we translate the value ~sq_is_cycled~ from a boolean to a string.
+
+#+begin_src sql
+    IF sq_is_cycled
+      THEN 
+        sq_cycled := 'CYCLE';
+    ELSE
+        sq_cycled := 'NO CYCLE';
+    END IF;
+#+end_src
+
+If we could actually run that code we would see that records_id_seq is not cycled and we get ~'NO CYCLE'~.
+
+So now we want to copy over the data from ~primary.records_id_seq~ to ~secondary.records_id_seq~
+#+begin_src sql
+    ALTER SEQUENCE secondary.records_id_seq
+            INCREMENT BY 1 
+            MINVALUE     1
+            MAXVALUE     9223372036854775807
+            START WITH   1
+            RESTART      1
+            CACHE        1
+            NO CYCLE;
+#+end_src
+
+Then because we're cloning all the meta information and the records themselves, we need to setting
+#+begin_src sql
+SELECT setval( 'secondary.records_id_seq', 58, true);
+#+end_src
+
+And now we just do that like... 50 more times.
+
+#+begin_src sql
+  do $$
+  FOR object IN
+        SELECT sequence_name::text 
+          FROM information_schema.sequences
+          WHERE sequence_schema = quote_ident(source_schema)
+      LOOP
+        EXECUTE 'CREATE SEQUENCE ' || quote_ident(dest_schema) || '.' || quote_ident(object);
+        srctbl := quote_ident(source_schema) || '.' || quote_ident(object);
+
+        EXECUTE 'SELECT last_value, max_value, start_value, increment_by, min_value, cache_value, log_cnt, is_cycled, is_called 
+                  FROM ' || quote_ident(source_schema) || '.' || quote_ident(object) || ';' 
+                  INTO sq_last_value, sq_max_value, sq_start_value, sq_increment_by, sq_min_value, sq_cache_value, sq_log_cnt, sq_is_cycled, sq_is_called ; 
+
+        IF sq_is_cycled 
+          THEN 
+            sq_cycled := 'CYCLE';
+        ELSE
+            sq_cycled := 'NO CYCLE';
+        END IF;
+
+        EXECUTE 'ALTER SEQUENCE '   || quote_ident(dest_schema) || '.' || quote_ident(object) 
+                || ' INCREMENT BY ' || sq_increment_by
+                || ' MINVALUE '     || sq_min_value 
+                || ' MAXVALUE '     || sq_max_value
+                || ' START WITH '   || sq_start_value
+                || ' RESTART '      || sq_min_value 
+                || ' CACHE '        || sq_cache_value 
+                || sq_cycled || ' ;' ;
+
+        buffer := quote_ident(dest_schema) || '.' || quote_ident(object);
+        IF include_recs 
+            THEN
+                EXECUTE 'SELECT setval( ''' || buffer || ''', ' || sq_last_value || ', ' || sq_is_called || ');' ; 
+        ELSE
+                EXECUTE 'SELECT setval( ''' || buffer || ''', ' || sq_start_value || ', ' || sq_is_called || ');' ;
+        END IF;
+
+      END LOOP;
+  $$
+  END;
+#+end_src
+
+** Tables
+Now we want to copy tables. This requires us to 
+1. Get all the tables of interest
+2. Create the tables in the new schema
+3. Copy data from the source schema into the new schema
+4. 
+
+Again we want to iterate over all the tables
+#+begin_src sql
+  -- FOR OBJECT In
+      SELECT TABLE_NAME::text 
+        FROM information_schema.tables 
+       WHERE table_schema = 'primary'
+         AND table_type = 'BASE TABLE'
+#+end_src
+
+*** Create table
+For all of our examples we're going to use the ~records~ table
+#+begin_src sql
+CREATE TABLE secondary.records (LIKE primary.records INCLUDING ALL);
+#+end_src
+
+This statement included some new syntax for me. But it basically boils down to create a table with all the same, columns, indexes, and constraints as this other tables.
+#+begin_src sql
+SELECT * FROM secondary.records
+#+end_src
+
+*** Copy Data
+
+#+begin_src sql
+INSERT INTO secondary.records SELECT * FROM primary.records;
+#+end_src
+
+#+begin_src sql
+SELECT name, id FROM secondary.records LIMIT 10;
+#+end_src
+*** Update Default/Sequence values for columns
+
+#+begin_src sql
+        SELECT column_name::text, 
+               REPLACE(column_default::text, 'primary', 'secondary') 
+          FROM information_schema.COLUMNS 
+         WHERE table_schema = 'secondary'
+           AND TABLE_NAME = 'records'
+           AND column_default LIKE 'nextval(%primary%::regclass)'
+#+end_src
+
+Which then sets it to an expression, so any time an app is added to the column the id column calls nextval...
+#+begin_src sql
+ALTER TABLE secondary.records ALTER COLUMN id SET DEFAULT nextval('secondary.records_id_seq'::regclass);
+#+end_src
+
+EX:
+#+begin_src sql
+SELECT nextval('secondary.records_id_seq'::regclass);
+#+end_src
+
+** Foreign Key Constraints
+Magically generate queries to alter tables and add foreign key constraints
+#+begin_src sql
+
+  SELECT 'ALTER TABLE ' || quote_ident('secondary') || '.' || quote_ident(rn.relname) 
+                        || ' ADD CONSTRAINT ' || quote_ident(ct.conname) || ' ' || pg_get_constraintdef(ct.oid) || ';'
+    FROM pg_constraint ct
+    JOIN pg_class rn ON rn.oid = ct.conrelid
+   WHERE connamespace = 17550
+     AND rn.relkind = 'r'
+     AND ct.contype = 'f'
+
+  -- LOOP
+  --   EXECUTE qry;
+
+  -- END LOOP;
+#+end_src
+
+** Views
+We don't really use these so I didn't go into this
+** Functions
+We don't have schema specific functions, all of our functions are used from the ~shared_extensions~ schema and so we don't really use this either.
